@@ -14,241 +14,90 @@ const toDonghuaSlug = (slug) =>
 // "against-the-sky-supreme-episode-1-subtitle-indonesia"
 // route /episode/<slug> sudah handle ini
 
-// ─── LOAD SCRIPT HELPER ───────────────────────────────────────────────────────
-function loadScript(src) {
-  return new Promise((res, rej) => {
-    if (document.querySelector(`script[src="${src}"]`)) return res();
-    const s = document.createElement("script");
-    s.src = src; s.onload = res; s.onerror = rej;
-    document.head.appendChild(s);
-  });
-}
-function loadLink(href) {
-  if (document.querySelector(`link[href="${href}"]`)) return;
-  const l = document.createElement("link");
-  l.rel = "stylesheet"; l.href = href;
-  document.head.appendChild(l);
-}
+// ─── VIDEO EMBED ──────────────────────────────────────────────────────────────
+// Deteksi jenis URL: mp4/webm → <video>, m3u8 → HLS, lainnya → iframe
+function VideoEmbed({ url, title }) {
+  const videoRef = useRef(null);
+  const hlsRef   = useRef(null);
 
-// ─── CUSTOM VIDEO PLAYER ──────────────────────────────────────────────────────
-// Plyr.js player dengan:
-// - Tombol maju/mundur 10 detik
-// - Tombol prev/next episode
-// - Tombol episode list (panel slide-in saat fullscreen)
-// - Pilihan kualitas dari medias[] (direct .mp4)
-// - Fallback ke iframe kalau direct link gagal / tidak ada
-function CustomPlayer({ epSlug, curNum, prevEp, nextEp, onNavEp, sortedEps, curSlug, iframeUrl }) {
-  const videoRef  = useRef(null);
-  const plyrRef   = useRef(null);
-  const wrapRef   = useRef(null);
-  const epPanelRef = useRef(null);
+  const isDirectVideo = url && /\.(mp4|webm|ogg)(\?.*)?$/i.test(url);
+  const isHLS         = url && /\.m3u8(\?.*)?$/i.test(url);
 
-  const [medias,      setMedias]      = useState([]);   // [{quality, url}]
-  const [curQuality,  setCurQuality]  = useState(null);
-  const [loadingVS,   setLoadingVS]   = useState(true);
-  const [useFallback, setUseFallback] = useState(false);
-  const [epPanelOpen, setEpPanelOpen] = useState(false);
-  const [plyrReady,   setPlyrReady]   = useState(false);
-  const [savedTime,   setSavedTime]   = useState(0);
-
-  // ── Fetch /video-source/<slug> ──
+  // HLS via hls.js (lazy-loaded dari CDN)
   useEffect(() => {
-    if (!epSlug) return;
-    setLoadingVS(true); setMedias([]); setCurQuality(null); setUseFallback(false);
-    apiFetch(`/video-source/${epSlug}`)
-      .then(d => {
-        const list = d?.medias || [];
-        if (!list.length) { setUseFallback(true); return; }
-        // Normalisasi format: {quality, url}
-        const parsed = list.map((m, i) => ({
-          quality: m.quality || m.label || m.resolution || `${i + 1}`,
-          url: m.url,
-        }));
-        setMedias(parsed);
-        // Pilih kualitas tertinggi (biasanya 720p)
-        const best = parsed.find(m => m.quality.includes("720"))
-          || parsed[parsed.length - 1];
-        setCurQuality(best);
-      })
-      .catch(() => setUseFallback(true))
-      .finally(() => setLoadingVS(false));
-  }, [epSlug]);
+    if (!isHLS || !videoRef.current) return;
 
-  // ── Load Plyr CSS + JS lalu init ──
-  useEffect(() => {
-    if (useFallback || !curQuality || !videoRef.current) return;
-
-    loadLink("https://cdn.jsdelivr.net/npm/plyr@3/dist/plyr.css");
-    loadScript("https://cdn.jsdelivr.net/npm/plyr@3/dist/plyr.polyfilled.js")
-      .then(() => {
-        // Destroy instance lama
-        if (plyrRef.current) { try { plyrRef.current.destroy(); } catch {} plyrRef.current = null; }
-
-        const player = new window.Plyr(videoRef.current, {
-          controls: [
-            "play-large","play","rewind","fast-forward",
-            "progress","current-time","duration",
-            "mute","volume","captions","settings","fullscreen",
-          ],
-          seekTime: 10,
-          settings: ["quality","speed"],
-          speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 2] },
-          keyboard: { focused: true, global: true },
-          tooltips: { controls: true, seek: true },
-          invertTime: false,
-        });
-
-        player.on("ready", () => setPlyrReady(true));
-
-        // Restore waktu setelah ganti kualitas
-        player.on("loadeddata", () => {
-          if (savedTime > 0) {
-            player.currentTime = savedTime;
-            setSavedTime(0);
-          }
-        });
-
-        plyrRef.current = player;
-      })
-      .catch(() => setUseFallback(true));
-
-    return () => {
-      if (plyrRef.current) { try { plyrRef.current.destroy(); } catch {} plyrRef.current = null; }
-      setPlyrReady(false);
-    };
-  }, [curQuality, useFallback]);
-
-  // ── Ganti kualitas tanpa reload dari awal ──
-  const switchQuality = (media) => {
-    if (!plyrRef.current || media.url === curQuality?.url) return;
-    const t = plyrRef.current.currentTime || 0;
-    setSavedTime(t);
-    setCurQuality(media);
-    // Plyr akan detect src change via <source> key → re-mount via key prop di <video>
-  };
-
-  // ── Tombol maju/mundur ──
-  const seek = (sec) => { if (plyrRef.current) plyrRef.current.currentTime = Math.max(0, (plyrRef.current.currentTime || 0) + sec); };
-
-  // ── Episode panel: inject ke fullscreen container ──
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    const panel = epPanelRef.current;
-    if (!wrap || !panel) return;
-
-    const onFsChange = () => {
-      const fsEl = document.fullscreenElement;
-      if (fsEl && (fsEl === wrap || fsEl.contains(wrap) || wrap.contains(fsEl))) {
-        // masukkan panel ke dalam elemen fullscreen
-        fsEl.appendChild(panel);
-      } else {
-        // kembalikan ke wrap saat keluar fullscreen
-        wrap.appendChild(panel);
+    let hls;
+    const initHLS = (Hls) => {
+      if (Hls.isSupported()) {
+        hls = new Hls();
+        hlsRef.current = hls;
+        hls.loadSource(url);
+        hls.attachMedia(videoRef.current);
+      } else if (videoRef.current.canPlayType("application/vnd.apple.mpegurl")) {
+        // Safari native HLS
+        videoRef.current.src = url;
       }
     };
-    document.addEventListener("fullscreenchange", onFsChange);
-    return () => document.removeEventListener("fullscreenchange", onFsChange);
-  }, []);
 
-  // Fallback → iframe biasa
-  if (useFallback || (!loadingVS && !medias.length)) {
-    if (!iframeUrl) return (
-      <div className="video-placeholder">
-        <span style={{fontSize:42,opacity:.4}}>📺</span>
-        <p>Tidak ada sumber video tersedia</p>
-      </div>
-    );
+    if (window.Hls) {
+      initHLS(window.Hls);
+    } else {
+      const script = document.createElement("script");
+      script.src = "https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js";
+      script.onload = () => initHLS(window.Hls);
+      document.head.appendChild(script);
+    }
+
+    return () => {
+      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+    };
+  }, [url, isHLS]);
+
+  if (!url) return null;
+
+  // Raw video file
+  if (isDirectVideo) {
     return (
-      <iframe src={iframeUrl} className="video-iframe" allowFullScreen
-        allow="autoplay; fullscreen; picture-in-picture" title={`Episode ${curNum}`} />
+      <video
+        className="video-iframe"
+        controls
+        autoPlay
+        playsInline
+        title={title}
+        key={url}
+      >
+        <source src={url} />
+        Browser kamu tidak mendukung tag video.
+      </video>
     );
   }
 
-  if (loadingVS) return (
-    <div className="video-placeholder">
-      <div className="spinner large" />
-      <p>Memuat video...</p>
-    </div>
-  );
-
-  return (
-    <div className="cp-wrap" ref={wrapRef}>
-      {/* Plyr video element */}
+  // M3U8 / HLS stream
+  if (isHLS) {
+    return (
       <video
         ref={videoRef}
-        className="cp-video"
-        key={curQuality?.url}
+        className="video-iframe"
+        controls
         autoPlay
         playsInline
-        crossOrigin="anonymous"
-      >
-        {curQuality && <source src={curQuality.url} type="video/mp4" />}
-      </video>
+        title={title}
+        key={url}
+      />
+    );
+  }
 
-      {/* Overlay tombol custom — muncul di atas Plyr controls */}
-      <div className={`cp-overlay ${plyrReady ? "cp-overlay--ready" : ""}`}>
-        {/* Seek buttons */}
-        <button className="cp-seek-btn cp-seek-left"  onClick={() => seek(-10)} title="Mundur 10 detik">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/><text x="8" y="16" fontSize="7" fill="currentColor" stroke="none" fontWeight="700">10</text></svg>
-        </button>
-        <button className="cp-seek-btn cp-seek-right" onClick={() => seek(10)}  title="Maju 10 detik">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-.49-3.5"/><text x="8" y="16" fontSize="7" fill="currentColor" stroke="none" fontWeight="700">10</text></svg>
-        </button>
-
-        {/* Tombol episode list */}
-        <button className="cp-ep-list-btn" onClick={() => setEpPanelOpen(v => !v)} title="Daftar Episode">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-          <span>Episode</span>
-        </button>
-
-        {/* Tombol prev/next episode */}
-        <div className="cp-ep-nav">
-          <button className="cp-ep-nav-btn" onClick={() => prevEp && onNavEp(prevEp)} disabled={!prevEp} title="Episode Sebelumnya">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-            <span>Prev</span>
-          </button>
-          <button className="cp-ep-nav-btn" onClick={() => nextEp && onNavEp(nextEp)} disabled={!nextEp} title="Episode Berikutnya">
-            <span>Next</span>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-          </button>
-        </div>
-
-        {/* Pilihan kualitas */}
-        {medias.length > 1 && (
-          <div className="cp-quality">
-            {medias.map((m, i) => (
-              <button
-                key={i}
-                className={`cp-quality-btn ${curQuality?.url === m.url ? "active" : ""}`}
-                onClick={() => switchQuality(m)}
-              >
-                {m.quality}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Episode panel (slide-in) */}
-      <div ref={epPanelRef} className={`cp-ep-panel ${epPanelOpen ? "open" : ""}`}>
-        <div className="cp-ep-panel-header">
-          <span>Daftar Episode</span>
-          <button className="cp-ep-panel-close" onClick={() => setEpPanelOpen(false)}>✕</button>
-        </div>
-        <div className="cp-ep-panel-list">
-          {sortedEps.map(ep => (
-            <button
-              key={ep.slug}
-              className={`cp-ep-item ${ep.slug === curSlug ? "active" : ""}`}
-              onClick={() => { onNavEp(ep); setEpPanelOpen(false); }}
-            >
-              <span className="cp-ep-num">Ep {ep.episode || "?"}</span>
-              {ep.subtitle && <span className="cp-ep-sub">{ep.subtitle}</span>}
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
+  // OK.ru, Dailymotion, dll → iframe embed
+  return (
+    <iframe
+      src={url}
+      className="video-iframe"
+      allowFullScreen
+      allow="autoplay; fullscreen; picture-in-picture"
+      title={title}
+      key={url}
+    />
   );
 }
 
@@ -853,11 +702,12 @@ const WatchPage = () => {
   const epSlug       = decodeURIComponent(encodedSlug);
   const { epNum: initNum, donghuaSlug, title, thumb, epList = [] } = state;
 
-  const [epData,  setEpData]  = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [err,     setErr]     = useState(null);
-  const [curSlug, setCurSlug] = useState(epSlug);
-  const [curNum,  setCurNum]  = useState(initNum);
+  const [epData,   setEpData]   = useState(null);
+  const [loading,  setLoading]  = useState(true);
+  const [err,      setErr]      = useState(null);
+  const [curSlug,  setCurSlug]  = useState(epSlug);
+  const [curNum,   setCurNum]   = useState(initNum);
+  const [player,   setPlayer]   = useState(null);
 
   const sortedEps = [...epList].sort((a, b) =>
     (parseFloat(a.episode) || 0) - (parseFloat(b.episode) || 0)
@@ -867,11 +717,19 @@ const WatchPage = () => {
   const nextEp = curIdx < sortedEps.length - 1 ? sortedEps[curIdx + 1] : null;
 
   const loadEpisode = useCallback((slug, num) => {
-    setLoading(true); setErr(null); setEpData(null);
+    setLoading(true); setErr(null); setEpData(null); setPlayer(null);
+
+    // slug dari episode list sudah full path, contoh:
+    // "against-the-sky-supreme-episode-1-subtitle-indonesia"
+    // route API: GET /episode/<slug>
     apiFetch(`/episode/${slug}`)
       .then(d => {
         setEpData(d);
-        if (donghuaSlug) saveHistory(donghuaSlug, slug, num, title, thumb);
+        const players = d?.result?.players || [];
+        if (players.length) setPlayer(players[0]);
+        if (donghuaSlug) {
+          saveHistory(donghuaSlug, slug, num, title, thumb);
+        }
       })
       .catch(e => setErr(e.message))
       .finally(() => setLoading(false));
@@ -879,13 +737,17 @@ const WatchPage = () => {
 
   useEffect(() => {
     loadEpisode(curSlug, curNum);
+    // Update URL tanpa reload
     window.history.replaceState(null, "", `/watch/${encodeURIComponent(curSlug)}`);
   }, [curSlug]);
 
-  const navToEp = (ep) => { setCurSlug(ep.slug); setCurNum(ep.episode); };
+  const navToEp = (ep) => {
+    setCurSlug(ep.slug);
+    setCurNum(ep.episode);
+  };
 
-  // Fallback iframe URL (OK.ru/Dailymotion dari /episode/)
-  const iframeUrl = epData?.result?.players?.[0]?.url || "";
+  const players  = epData?.result?.players || [];
+  const videoUrl = player?.url || "";
 
   return (
     <div className="watch-page">
@@ -925,20 +787,56 @@ const WatchPage = () => {
             </button>
           </div>
         )}
-        {!loading && !err && (
-          <CustomPlayer
-            key={curSlug}
-            epSlug={curSlug}
-            curNum={curNum}
-            prevEp={prevEp}
-            nextEp={nextEp}
-            onNavEp={navToEp}
-            sortedEps={sortedEps}
-            curSlug={curSlug}
-            iframeUrl={iframeUrl}
-          />
+        {!loading && !err && videoUrl && (
+          <VideoEmbed url={videoUrl} title={`Episode ${curNum}`} />
+        )}
+        {!loading && !err && !videoUrl && (
+          <div className="video-placeholder">
+            <Ic n="tv" s={52} />
+            <p>
+              {players.length === 0
+                ? "Tidak ada player tersedia untuk episode ini"
+                : "Pilih server di bawah untuk mulai menonton"}
+            </p>
+          </div>
         )}
       </div>
+
+      {/* Server / Player selector */}
+      {!loading && players.length > 0 && (
+        <div className="watch-controls">
+          <p className="controls-label">Server / Player:</p>
+          <div className="server-list">
+            {players.map((p, i) => (
+              <button key={i} className={`server-btn ${player === p ? "active" : ""}`}
+                onClick={() => setPlayer(p)}>
+                {p.name || `Server ${i + 1}`}
+              </button>
+            ))}
+          </div>
+          {videoUrl && (
+            <a href={videoUrl} target="_blank" rel="noreferrer" className="open-ext">
+              <Ic n="ext" s={13} /> Buka di tab baru jika tidak bisa diputar
+            </a>
+          )}
+        </div>
+      )}
+
+      {/* Episode navigator */}
+      {sortedEps.length > 0 && (
+        <div className="watch-controls ep-navigator">
+          <p className="controls-label">Episode ({sortedEps.length} total):</p>
+          <div className="ep-nav-grid">
+            {sortedEps.map(ep => (
+              <button key={ep.slug}
+                className={`ep-nav-chip ${ep.slug === curSlug ? "current" : ""}`}
+                onClick={() => navToEp(ep)}>
+                {ep.episode || "?"}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1284,7 +1182,7 @@ body{background:var(--bg);color:var(--t);font-family:'Outfit',sans-serif;min-hei
 .ep-nav-btn:hover:not(:disabled){border-color:var(--acc);color:var(--acc)}
 .ep-nav-btn:disabled{opacity:.3;cursor:not-allowed}
 
-.video-wrap{width:100%;aspect-ratio:16/9;background:#000;position:relative;overflow:hidden}
+.video-wrap{width:100%;aspect-ratio:16/9;background:#000;position:relative}
 .video-iframe{width:100%;height:100%;border:none;display:block}
 .video-placeholder{
   position:absolute;inset:0;display:flex;flex-direction:column;
@@ -1293,131 +1191,39 @@ body{background:var(--bg);color:var(--t);font-family:'Outfit',sans-serif;min-hei
 }
 .video-placeholder svg{opacity:.5}
 
-/* ── CUSTOM PLAYER ── */
-.cp-wrap{
-  position:relative;width:100%;height:100%;background:#000;
+.watch-controls{
+  padding:14px 16px;background:var(--bg2);border-top:1px solid var(--border);
+  display:flex;flex-direction:column;gap:10px;
 }
-.cp-video{width:100%;height:100%;display:block;object-fit:contain}
-
-/* Plyr theme override — dark accent */
-.cp-wrap .plyr--video .plyr__control--overlaid{background:var(--acc)}
-.cp-wrap .plyr--full-ui input[type=range]{color:var(--acc)}
-.cp-wrap .plyr__control:hover{background:var(--acc)!important}
-.cp-wrap .plyr__menu__container .plyr__control[role=menuitemradio][aria-checked=true]::before{background:var(--acc)}
-
-/* overlay tombol custom — terletak di atas plyr controls */
-.cp-overlay{
-  position:absolute;top:0;left:0;right:0;bottom:54px; /* 54px = tinggi plyr controls */
-  pointer-events:none;
-  opacity:0;transition:opacity .25s;
+.watch-controls.ep-navigator{max-height:260px}
+.controls-label{font-size:11px;text-transform:uppercase;letter-spacing:2px;
+  color:var(--t2);font-weight:600;margin-bottom:2px}
+.server-list{display:flex;flex-wrap:wrap;gap:8px}
+.server-btn{
+  padding:8px 16px;background:var(--bg3);border:1px solid var(--border);
+  color:var(--t2);border-radius:8px;cursor:pointer;
+  font-family:'Outfit',sans-serif;font-size:13px;transition:all .2s;
 }
-.cp-overlay--ready{opacity:1}
-.cp-wrap:hover .cp-overlay{pointer-events:auto}
-
-/* seek buttons — kiri & kanan tengah */
-.cp-seek-btn{
-  position:absolute;top:50%;transform:translateY(-50%);
-  background:rgba(0,0,0,.55);border:none;color:#fff;
-  width:52px;height:52px;border-radius:50%;cursor:pointer;
-  display:flex;align-items:center;justify-content:center;
-  pointer-events:auto;transition:background .2s;padding:0;
-}
-.cp-seek-btn svg{width:26px;height:26px}
-.cp-seek-btn:hover{background:rgba(233,69,96,.7)}
-.cp-seek-left{left:18%}
-.cp-seek-right{right:18%}
-
-/* episode list button — pojok kanan atas */
-.cp-ep-list-btn{
-  position:absolute;top:12px;right:12px;
+.server-btn:hover{border-color:var(--acc);color:var(--t)}
+.server-btn.active{background:var(--acc);border-color:var(--acc);color:#fff}
+.open-ext{
   display:flex;align-items:center;gap:6px;
-  background:rgba(0,0,0,.6);border:1px solid rgba(255,255,255,.15);
-  color:#fff;border-radius:8px;padding:7px 13px;cursor:pointer;
-  font-family:'Outfit',sans-serif;font-size:12px;font-weight:600;
-  pointer-events:auto;transition:background .2s;backdrop-filter:blur(6px);
+  font-size:12px;color:var(--t2);text-decoration:none;width:fit-content;
 }
-.cp-ep-list-btn svg{width:16px;height:16px}
-.cp-ep-list-btn:hover{background:rgba(233,69,96,.7)}
+.open-ext:hover{color:var(--acc)}
 
-/* prev/next episode — pojok kiri atas */
-.cp-ep-nav{
-  position:absolute;top:12px;left:12px;
-  display:flex;gap:6px;pointer-events:auto;
+.ep-nav-grid{
+  display:flex;flex-wrap:wrap;gap:5px;
+  max-height:200px;overflow-y:auto;padding-right:4px;
 }
-.cp-ep-nav-btn{
-  display:flex;align-items:center;gap:4px;
-  background:rgba(0,0,0,.6);border:1px solid rgba(255,255,255,.15);
-  color:#fff;border-radius:8px;padding:7px 12px;cursor:pointer;
-  font-family:'Outfit',sans-serif;font-size:12px;font-weight:600;
-  transition:background .2s;backdrop-filter:blur(6px);
+.ep-nav-chip{
+  padding:6px 10px;background:var(--bg3);border:1px solid var(--border);
+  color:var(--t2);border-radius:6px;cursor:pointer;
+  font-family:'Outfit',sans-serif;font-size:12px;transition:all .2s;
+  min-width:38px;text-align:center;
 }
-.cp-ep-nav-btn svg{width:14px;height:14px}
-.cp-ep-nav-btn:hover:not(:disabled){background:rgba(233,69,96,.7)}
-.cp-ep-nav-btn:disabled{opacity:.35;cursor:not-allowed}
-
-/* quality selector — pojok kiri bawah di atas controls */
-.cp-quality{
-  position:absolute;bottom:62px;left:12px;
-  display:flex;gap:5px;pointer-events:auto;
-}
-.cp-quality-btn{
-  padding:5px 10px;background:rgba(0,0,0,.65);
-  border:1px solid rgba(255,255,255,.2);color:rgba(255,255,255,.75);
-  border-radius:6px;cursor:pointer;font-family:'Outfit',sans-serif;
-  font-size:11px;font-weight:600;transition:all .2s;backdrop-filter:blur(6px);
-}
-.cp-quality-btn:hover{border-color:var(--acc);color:#fff}
-.cp-quality-btn.active{background:var(--acc);border-color:var(--acc);color:#fff}
-
-/* episode panel slide-in dari kanan */
-.cp-ep-panel{
-  position:absolute;top:0;right:0;bottom:0;width:260px;
-  background:rgba(13,13,20,.96);backdrop-filter:blur(16px);
-  border-left:1px solid rgba(255,255,255,.08);
-  display:flex;flex-direction:column;
-  transform:translateX(100%);transition:transform .28s cubic-bezier(.4,0,.2,1);
-  z-index:50;
-}
-.cp-ep-panel.open{transform:translateX(0)}
-.cp-ep-panel-header{
-  display:flex;align-items:center;justify-content:space-between;
-  padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.07);
-  font-size:13px;font-weight:700;color:#fff;letter-spacing:.5px;flex-shrink:0;
-}
-.cp-ep-panel-close{
-  background:none;border:none;color:rgba(255,255,255,.5);cursor:pointer;
-  font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;transition:color .2s;
-}
-.cp-ep-panel-close:hover{color:#fff}
-.cp-ep-panel-list{
-  flex:1;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:4px;
-}
-.cp-ep-panel-list::-webkit-scrollbar{width:3px}
-.cp-ep-panel-list::-webkit-scrollbar-thumb{background:var(--acc);border-radius:2px}
-.cp-ep-item{
-  display:flex;flex-direction:column;align-items:flex-start;gap:2px;
-  padding:9px 12px;background:rgba(255,255,255,.04);
-  border:1px solid transparent;border-radius:8px;cursor:pointer;
-  font-family:'Outfit',sans-serif;transition:all .18s;text-align:left;
-}
-.cp-ep-item:hover{background:rgba(233,69,96,.12);border-color:rgba(233,69,96,.3)}
-.cp-ep-item.active{background:rgba(233,69,96,.2);border-color:var(--acc)}
-.cp-ep-num{font-size:12px;font-weight:700;color:#fff}
-.cp-ep-item.active .cp-ep-num{color:var(--acc)}
-.cp-ep-sub{font-size:10px;color:rgba(255,255,255,.45);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-
-/* Fullscreen: panel & overlay tetap tampil */
-:fullscreen .cp-ep-panel,:fullscreen .cp-overlay,
-:-webkit-full-screen .cp-ep-panel,:-webkit-full-screen .cp-overlay{display:flex}
-:fullscreen .cp-wrap,:-webkit-full-screen .cp-wrap{height:100vh}
-
-/* Mobile */
-@media(max-width:480px){
-  .cp-seek-left{left:8%}
-  .cp-seek-right{right:8%}
-  .cp-ep-panel{width:200px}
-  .cp-ep-nav-btn span{display:none}
-}
+.ep-nav-chip:hover{border-color:var(--acc);color:var(--t)}
+.ep-nav-chip.current{background:var(--acc);border-color:var(--acc);color:#fff}
 
 /* RESPONSIVE */
 @media(max-width:640px){
