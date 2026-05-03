@@ -1,6 +1,6 @@
 # 🎌 Anichin App — Nonton Donghua Sub Indo
 
-UI untuk streaming donghua berbasis React, menggunakan [anichin-api](https://github.com/asmindev/anichin-api).
+UI untuk streaming donghua berbasis React, menggunakan [anichin-api](https://github.com/Sanzzy111/anichin-api).
 
 ---
 
